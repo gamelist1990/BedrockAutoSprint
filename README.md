@@ -6,9 +6,28 @@
 DLLサンプルを**別々のリポジトリ・CMakeプロジェクト**として管理する例です。
 このプロジェクトにはBedrock SDKのヘッダーやソースコードの複製は含めません。
 
+## サンプルコード
+
+```cpp
+#include <bedrock/mod.hpp>
+
+BEDROCK_MOD([](bedrock::Client& client) {
+    client.input().autoSprint();
+});
+```
+
+**この数行がサンプルの全機能です。** DLLの初期化、20msごとの更新、
+`manifest.json` の取得、対応バージョンへの自動切替、入力のクリーンアップは
+BedrockDynamicSDK側に移しました。
+対応外のゲームバージョンや取得エラーではModは何も変更しません。
+
+ほかのModも同様に `BEDROCK_MOD([](bedrock::Client& mc){ ... });` と書くだけ。
+`mc.version()`、`mc.inGame()`、`mc.input().down(bedrock::Key::Forward)`
+などが利用できます。既存のC++型・関数・GUIはSDKのサポート範囲内のみです。
+
 - 実行ファイル：`BedrockAutoSprint.dll` だけ
 - SDK取得方法：CMake **FetchContent** がGitHubの `BedrockDynamicSDK` を取得
-- 使用するSDK：`<bedrock/remote_catalog.hpp>`, `<bedrock/resolver.hpp>` と `bedrock_resolver`
+- 使用するSDK：`<bedrock/mod.hpp>` と `bedrock::sdk`
 - PreLoader/LeviLamina/DLL追加依存なし
 - ゲーム内GUIなし、設定ファイルなし
 
@@ -71,7 +90,7 @@ FetchContent_Declare(
   GIT_TAG main
 )
 FetchContent_MakeAvailable(bedrock_sdk)
-target_link_libraries(BedrockAutoSprint PRIVATE bedrock_resolver)
+target_link_libraries(BedrockAutoSprint PRIVATE bedrock::sdk)
 ```
 
 配布DLLにはSDKの静的ライブラリが統合されます。
@@ -84,4 +103,4 @@ Github上でのSDK追加・修正は**次回ビルド時に**反映でき、
   自分でロードする必要があります。
 - Minecraft本体への注入・動作試験はまだ行っていません。
 - フックを設置しないため、クライアントの未検証オフセットやvtableは使いません。
-- コード本体：`src/auto_sprint.cpp`。判断ロジック：`include/auto_sprint_policy.hpp`。
+- コード本体：`src/auto_sprint.cpp`。通常入力と判定ロジックはSDKの `<bedrock/client.hpp>` に分離。

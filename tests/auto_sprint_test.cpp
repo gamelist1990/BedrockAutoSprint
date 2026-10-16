@@ -1,13 +1,11 @@
-#include "auto_sprint_policy.hpp"
+#include <bedrock/client.hpp>
 #include <cassert>
 #include <iostream>
-
 int main() {
-    using bedrock::shouldAutoSprint;
-    assert(shouldAutoSprint(true,true,true,false));
-    assert(!shouldAutoSprint(false,true,true,false));
-    assert(!shouldAutoSprint(true,false,true,false));
-    assert(!shouldAutoSprint(true,true,false,false));
-    assert(!shouldAutoSprint(true,true,true,true));
-    std::cout<<"auto_sprint_test: PASS\n";
+    assert(bedrock::shouldSprint(true,true,false));
+    assert(!bedrock::shouldSprint(true,false,false));
+    assert(!bedrock::shouldSprint(false,true,false));
+    assert(!bedrock::shouldSprint(true,true,true));
+    assert(static_cast<unsigned>(bedrock::ModStatus::Unsupported)==3);
+    std::cout << "AutoSprint SDK policy test: PASS\n";
 }
