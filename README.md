@@ -77,3 +77,32 @@ Windows MSVC + CMake：
 成果物：build/Release/BedrockAutoSprint.dll（単一DLL）。
 LinuxではイベントAPI・Modロジックのユニットテストを実施。
 **Minecraft実機へのInject・ゲーム内動作テストは未実施**です。
+
+
+## Debug console and Logger
+
+The sample uses SDK's optional header-only [Logger API](https://github.com/gamelist1990/BedrockDynamicSDK/blob/main/include/bedrock/logger.hpp)
+for startup/version verification messages, without opening another window by default.
+On Windows, the debugger can receive OutputDebugStringA messages.
+
+To show a console explicitly, build with:
+
+    cmake -S . -B build -A x64 -DBEDROCK_AUTOSPRINT_DEBUG_CONSOLE=ON
+    cmake --build build --config Release
+
+The sample then calls Console::open(L"Bedrock AutoSprint Debug") on the worker
+thread **after** DllMain. Any other mod can use:
+
+    #include <bedrock/console.hpp>
+    #include <bedrock/logger.hpp>
+
+    bedrock::Console::open(L"My Debug Console");
+    bedrock::Logger logger{"MyMod"};
+    logger.debug("Loading...");
+    logger.info("Loaded version: ", "1.26.52.3");
+    logger.warn("Missing symbol: ", "ClientInstance");
+    logger.error("Could not initialize");
+
+For mod projects that only want logging, CMake target bedrock::logging is
+header-only with no symbol resolver or networking dependency. The SDK never
+opens a console automatically.

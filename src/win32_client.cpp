@@ -7,6 +7,8 @@
 #include <bedrock/events.hpp>
 #include <bedrock/remote_catalog.hpp>
 #include <bedrock/resolver.hpp>
+#include <bedrock/console.hpp>
+#include <bedrock/logger.hpp>
 #include "auto_sprint_feature.hpp"
 #include <array>
 #include <atomic>
@@ -55,11 +57,17 @@ DWORD WINAPI startClient(void*) {
         return 1;
     }
     status.store(Status::Loading);
+#ifdef BEDROCK_AUTOSPRINT_DEBUG_CONSOLE
+    // Explicitly opt-in; never create a console in DllMain.
+    bedrock::Console::open(L"Bedrock AutoSprint Debug");
+#endif
+    bedrock::Logger logger{"AutoSprint"};
+    logger.debug("Starting version verification");
     bedrock::ProfileChoice version;
     std::string profile, error;
     // Optional symbol module, linked only by mods that need version data.
     if (!bedrock::fetchSupportedProfile(profile, version, error)) {
-        OutputDebugStringA(("AutoSprint skipped: " + error + "\n").c_str());
+        logger.warn("Unsupported build or network error: ", error);
         status.store(Status::Unsupported);
         return 0;
     }
@@ -68,7 +76,7 @@ DWORD WINAPI startClient(void*) {
         !resolver.attachWindowsMainModule(error) || !resolver.exactBuild() ||
         !resolver.resolve(
             "ClientInputUpdateSystemInternal::tickUpdateClientInput", true)) {
-        OutputDebugStringA("AutoSprint skipped: incomplete version compatibility.\n");
+        logger.warn("Incomplete version compatibility: ", error);
         status.store(Status::Unsupported);
         return 0;
     }
@@ -85,6 +93,7 @@ DWORD WINAPI startClient(void*) {
     }};
     std::uint64_t seq = 0;
     status.store(Status::Running);
+    logger.info("AutoSprint ready on Minecraft ", version.version);
     while (!stopRequested.load(std::memory_order_acquire)) {
         const bool focused = clientFocused();
         const bool gameplay = gameplayInputActive();
@@ -109,6 +118,7 @@ DWORD WINAPI startClient(void*) {
     }
     // Feature destructor emits release when its injected key remains owned.
     status.store(Status::Stopped);
+    logger.info("AutoSprint stopped");
     return 0;
 }
 } // namespace

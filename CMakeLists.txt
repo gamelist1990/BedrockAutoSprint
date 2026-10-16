@@ -26,7 +26,14 @@ FetchContent_MakeAvailable(bedrock_sdk)
 if(WIN32)
     add_library(BedrockAutoSprint SHARED src/auto_sprint.cpp src/win32_client.cpp)
     target_include_directories(BedrockAutoSprint PRIVATE include)
-    target_link_libraries(BedrockAutoSprint PRIVATE bedrock::events bedrock::symbols user32)
+    option(BEDROCK_AUTOSPRINT_DEBUG_CONSOLE
+        "Open optional Win32 console to show debug logs" OFF)
+    target_link_libraries(BedrockAutoSprint PRIVATE
+        bedrock::events bedrock::symbols bedrock::logging user32)
+    if(BEDROCK_AUTOSPRINT_DEBUG_CONSOLE)
+        target_compile_definitions(BedrockAutoSprint PRIVATE
+            BEDROCK_AUTOSPRINT_DEBUG_CONSOLE=1)
+    endif()
     target_compile_features(BedrockAutoSprint PRIVATE cxx_std_20)
     if(MSVC)
         set_property(TARGET BedrockAutoSprint PROPERTY MSVC_RUNTIME_LIBRARY
