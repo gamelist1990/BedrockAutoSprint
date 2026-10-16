@@ -2,33 +2,36 @@
 #include <bedrock/events.hpp>
 #include <functional>
 
-// This is the ENTIRE mod feature, owned by the sample project, not the SDK.
+// Sample-owned input snapshot event. Not a BedrockDynamicSDK core dependency.
+// A complete state every frame avoids lost KeyEvent edges.
+struct InputFrameEvent {
+    bool minecraftFocused{};
+    bool gameplayCursorHidden{};
+    bool forwardHeld{};
+    bool shiftHeld{};
+    bool leftCtrlHeld{};
+
+    [[nodiscard]] bool shouldSprint() const noexcept {
+        return minecraftFocused && gameplayCursorHidden && forwardHeld && !shiftHeld;
+    }
+};
+using AutoSprintEvents = bedrock::EventBus<InputFrameEvent>;
+
 class AutoSprintFeature {
 public:
-    // Return true when the client successfully sent a sprint key transition.
-    using SendSprint = std::function<bool(bool)>; // true = press, false = release
-    using CanPress = std::function<bool()>; // don't override a user's held Ctrl
-
-    AutoSprintFeature(bedrock::ClientEvents& events,
-                      SendSprint send, CanPress canPress);
+    using SendSprint = std::function<bool(bool)>;
+    explicit AutoSprintFeature(AutoSprintEvents& events, SendSprint send);
     ~AutoSprintFeature();
 
     AutoSprintFeature(const AutoSprintFeature&) = delete;
     AutoSprintFeature& operator=(const AutoSprintFeature&) = delete;
 
+    [[nodiscard]] bool ownsSprint() const noexcept { return ownSprint_; }
 private:
-    void update();
+    void onInputFrame(const InputFrameEvent& frame);
     void release();
-
-    bedrock::ClientEvents& events_;
+    AutoSprintEvents& events_;
     SendSprint send_;
-    CanPress canPress_;
-    bool active_{};
-    bool forward_{};
-    bool leftShift_{};
-    bool rightShift_{};
     bool ownSprint_{};
-    bedrock::EventChannel<bedrock::KeyEvent>::ListenerId keyId_{};
-    bedrock::EventChannel<bedrock::GameplayEvent>::ListenerId gameplayId_{};
-    bedrock::EventChannel<bedrock::UpdateEvent>::ListenerId updateId_{};
+    bedrock::EventChannel<InputFrameEvent>::ListenerId frameId_{};
 };

@@ -1,46 +1,73 @@
-#include <bedrock/events.hpp>
 #include "auto_sprint_feature.hpp"
 #include <cassert>
 #include <vector>
 
 int main() {
-    bedrock::ClientEvents events;
-    std::vector<bool> keyTransitions;
-    bool allowed = true;
+    AutoSprintEvents events;
+    std::vector<bool> transitions;
     {
-        AutoSprintFeature feature(events,
-            [&](bool press) { keyTransitions.push_back(press); return true; },
-            [&] { return allowed; });
-        assert(events.listeners<bedrock::UpdateEvent>() == 1);
+        AutoSprintFeature mod(events, [&](bool down) {
+            transitions.push_back(down);
+            return true;
+        });
+        assert(events.listeners<InputFrameEvent>() == 1);
+        InputFrameEvent frame{true,true,true,false,false};
+        events.emit(frame);
+        assert((transitions == std::vector<bool>{true}));
+        assert(mod.ownsSprint());
+        frame.leftCtrlHeld = true; // Our injected Ctrl now appears held.
+        events.emit(frame);
+        events.emit(frame);
+        assert(transitions.size() == 1);
 
-        events.emit(bedrock::KeyEvent{'W',true,false});
-        events.emit(bedrock::UpdateEvent{1});
-        assert(keyTransitions.empty());  // Must be in-game.
+        frame.shiftHeld = true;
+        events.emit(frame);
+        assert((transitions == std::vector<bool>{true,false}));
+        assert(!mod.ownsSprint());
+        frame.shiftHeld = false;
+        frame.leftCtrlHeld = true; // Physical Ctrl held by player.
+        events.emit(frame);
+        assert(transitions.size() == 2);
+        frame.leftCtrlHeld = false;
+        events.emit(frame);
+        assert((transitions == std::vector<bool>{true,false,true}));
+        frame.forwardHeld = false;
+        events.emit(frame);
+        assert((transitions == std::vector<bool>{true,false,true,false}));
 
-        events.emit(bedrock::GameplayEvent{true});
-        events.emit(bedrock::UpdateEvent{2});
-        assert((keyTransitions == std::vector<bool>{true}));
+        frame.forwardHeld = true;
+        events.emit(frame);
+        assert(mod.ownsSprint());
+        frame.minecraftFocused = false;
+        events.emit(frame);
+        assert(!mod.ownsSprint());
 
-        events.emit(bedrock::UpdateEvent{3});
-        assert(keyTransitions.size() == 1); // No repeat injections.
+        frame.minecraftFocused = true;
+        frame.gameplayCursorHidden = false;
+        events.emit(frame);
+        assert(!mod.ownsSprint());
 
-        events.emit(bedrock::KeyEvent{0xA0,true,false});
-        events.emit(bedrock::UpdateEvent{4});
-        assert((keyTransitions == std::vector<bool>{true,false}));
-
-        allowed = false;
-        events.emit(bedrock::KeyEvent{0xA0,false,false});
-        events.emit(bedrock::UpdateEvent{5});
-        assert(keyTransitions.size() == 2); // Respect user-held Ctrl.
-
-        allowed = true;
-        events.emit(bedrock::UpdateEvent{6});
-        assert((keyTransitions == std::vector<bool>{true,false,true}));
-
-        events.emit(bedrock::GameplayEvent{false});
-        events.emit(bedrock::UpdateEvent{7});
-        assert((keyTransitions == std::vector<bool>{true,false,true,false}));
+        frame.gameplayCursorHidden = true;
+        frame.forwardHeld = true;
+        frame.leftCtrlHeld = false;
+        events.emit(frame);
+        assert(mod.ownsSprint());
     }
-    assert(events.listeners<bedrock::UpdateEvent>() == 0);
-    assert(events.listeners<bedrock::KeyEvent>() == 0);
+    assert(!transitions.back());
+    assert(events.listeners<InputFrameEvent>() == 0);
+
+    AutoSprintFeature failed(events, [](bool down) { return !down; });
+    events.emit(InputFrameEvent{true,true,true,false,false});
+    assert(!failed.ownsSprint());
+
+    // Exhaustively compare against the original direct-loop boolean condition.
+    for (int mask = 0; mask < 32; ++mask) {
+        InputFrameEvent state{
+            bool(mask & 1), bool(mask & 2), bool(mask & 4),
+            bool(mask & 8), bool(mask & 16)
+        };
+        const bool expected = bool(mask & 1) && bool(mask & 2) &&
+                              bool(mask & 4) && !bool(mask & 8);
+        assert(state.shouldSprint() == expected);
+    }
 }

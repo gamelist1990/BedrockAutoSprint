@@ -81,42 +81,22 @@ DWORD WINAPI startClient(void*) {
         return 0;
     }
 
-    // The event source is intentionally CLIENT-OWNED, not hidden in the SDK.
-    // UpdateEvent = a periodic platform poll, *NOT* native Minecraft game tick.
-    bedrock::ClientEvents events;
-    AutoSprintFeature feature(events, &sendCtrl, [] { return !keyHeld(VK_LCONTROL); });
-    bool previousFocus = false;
-    bool previousGameplay = false;
-    struct KeySample { int code; bool down; };
-    std::array<KeySample, 3> keys{{
-        {'W',false}, {VK_LSHIFT,false}, {VK_RSHIFT,false}
-    }};
-    std::uint64_t seq = 0;
+    // Same input capture as the previously working direct loop; only the
+    // transport into the client feature is event-based now.
+    AutoSprintEvents events;
+    AutoSprintFeature feature(events, &sendCtrl);
     status.store(Status::Running);
     logger.info("AutoSprint ready on Minecraft ", version.version);
     while (!stopRequested.load(std::memory_order_acquire)) {
         const bool focused = clientFocused();
-        const bool gameplay = gameplayInputActive();
-        if (focused != previousFocus) {
-            events.emit(bedrock::FocusEvent{focused});
-            previousFocus = focused;
-        }
-        if (gameplay != previousGameplay) {
-            events.emit(bedrock::GameplayEvent{gameplay});
-            previousGameplay = gameplay;
-        }
-        for (auto& key : keys) {
-            const bool now = keyHeld(key.code);
-            if (now != key.down) {
-                events.emit(bedrock::KeyEvent{
-                    static_cast<unsigned>(key.code), now, false});
-                key.down = now;
-            }
-        }
-        events.emit(bedrock::UpdateEvent{++seq});
+        const bool cursorHidden = gameplayInputActive();
+        const bool forward = keyHeld('W');
+        const bool shift = keyHeld(VK_LSHIFT) || keyHeld(VK_RSHIFT);
+        const bool ctrl = keyHeld(VK_LCONTROL);
+        events.emit(InputFrameEvent{focused, cursorHidden, forward, shift, ctrl});
         Sleep(20);
     }
-    // Feature destructor emits release when its injected key remains owned.
+    // Feature destructor releases only its own injected sprint key.
     status.store(Status::Stopped);
     logger.info("AutoSprint stopped");
     return 0;

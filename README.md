@@ -4,27 +4,40 @@ Minecraft Bedrock Windows x64向けAutoSprintサンプルMod。
 [BedrockDynamicSDK](https://github.com/gamelist1990/BedrockDynamicSDK) はイベントの購読・発行APIと、必要な場合のシンボル解決を提供。
 実際のスプリント入力、更新ループ、DLLエントリポイントはこの独立サンプル側で実装します。
 
-## Event APIの使用例
+## Event APIの使用例（入力スナップショット方式）
 
-イベント購読は src/auto_sprint.cpp に実装しています。
+以前正常動作していた実装と同じく、毎回 `GetAsyncKeyState` と
+フォーカス・カーソル状態を直接読み取り、**1フレーム分の状態を1つのイベント**
+として流します。押下・解放の変化だけを追う実装は廃止しました。
 
-    keyId_ = events.on<bedrock::KeyEvent>([this](const auto& e) {
-        if (e.virtualKey == 'W') forward_ = e.pressed;
-    });
-    updateId_ = events.on<bedrock::UpdateEvent>([this](const auto&) {
-        update();
-    });
+`InputFrameEvent` はこのサンプル独自のイベント型です。
+SDK本体にはAutoSprint依存を追加しません。
 
-- KeyEvent：キーコード・押下/解放・リピート
-- GameplayEvent：ゲーム操作中の状態
-- FocusEvent：ウィンドウフォーカス
-- UpdateEvent：クライアント側で発行する更新通知
-- on<T> / emit<T> / off<T>：購読 / 通知 / 解除
+```cpp
+using AutoSprintEvents = bedrock::EventBus<InputFrameEvent>;
 
-**UpdateEvent は Minecraft のゲームtickではありません。**
-このサンプルのWin32アダプターが20msごとにイベントを発行します。
-ネイティブのゲームTickや描画イベントは、別途検証済みのHookアダプターが必要です。
-イベント購読と発行は単一の所有スレッドで扱います。
+events.on<InputFrameEvent>([this](const InputFrameEvent& frame) {
+    if (frame.shouldSprint() && !ownSprint_ && !frame.leftCtrlHeld) {
+        if (send_(true)) ownSprint_ = true;
+    } else if (!frame.shouldSprint()) {
+        release();
+    }
+});
+
+// Win32アダプターは20msごとに現在の全入力状態を発行
+events.emit(InputFrameEvent{
+    minecraftFocused(), gameplayCursorHidden(),
+    keyHeld('W'), keyHeld(VK_LSHIFT) || keyHeld(VK_RSHIFT),
+    keyHeld(VK_LCONTROL)
+});
+```
+
+**Event API自体は軽量なヘッダーオンリー**で、入力の監視とスプリントの実行は
+完全にサンプル側にあります。Win32アダプターはMinecraftネイティブの
+`TickEvent` を使うわけではありません。
+
+フォーカス復帰やキーを押したままModをロードした場合でも、
+スナップショットから即座に正しい状態に復帰できます。
 
 ## ファイル構成
 
