@@ -24,8 +24,9 @@ FetchContent_MakeAvailable(bedrock_sdk)
 # Standalone DLL: linked SDK implementation is STATIC. Only Windows system
 # dependencies (WinHTTP, BCrypt, User32 and standard system DLLs) remain.
 if(WIN32)
-    add_library(BedrockAutoSprint SHARED src/auto_sprint.cpp)
-    target_link_libraries(BedrockAutoSprint PRIVATE bedrock::sdk)
+    add_library(BedrockAutoSprint SHARED src/auto_sprint.cpp src/win32_client.cpp)
+    target_include_directories(BedrockAutoSprint PRIVATE include)
+    target_link_libraries(BedrockAutoSprint PRIVATE bedrock::events bedrock::symbols user32)
     target_compile_features(BedrockAutoSprint PRIVATE cxx_std_20)
     if(MSVC)
         set_property(TARGET BedrockAutoSprint PROPERTY MSVC_RUNTIME_LIBRARY
@@ -35,8 +36,9 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(auto_sprint_test tests/auto_sprint_test.cpp)
-    target_link_libraries(auto_sprint_test PRIVATE bedrock::sdk)
+    add_executable(auto_sprint_test tests/auto_sprint_test.cpp src/auto_sprint.cpp)
+    target_include_directories(auto_sprint_test PRIVATE include)
+    target_link_libraries(auto_sprint_test PRIVATE bedrock::events)
     target_compile_features(auto_sprint_test PRIVATE cxx_std_20)
     if(MSVC)
         target_compile_options(auto_sprint_test PRIVATE /UNDEBUG)

@@ -1,106 +1,79 @@
 # BedrockAutoSprint
 
-**Minecraft Bedrock Windows x64 / AutoSprintだけのサンプルMod**
+Minecraft Bedrock Windows x64向けAutoSprintサンプルMod。
+[BedrockDynamicSDK](https://github.com/gamelist1990/BedrockDynamicSDK) はイベントの購読・発行APIと、必要な場合のシンボル解決を提供。
+実際のスプリント入力、更新ループ、DLLエントリポイントはこの独立サンプル側で実装します。
 
-[BedrockDynamicSDK](https://github.com/gamelist1990/BedrockDynamicSDK) のSDKと
-DLLサンプルを**別々のリポジトリ・CMakeプロジェクト**として管理する例です。
-このプロジェクトにはBedrock SDKのヘッダーやソースコードの複製は含めません。
+## Event APIの使用例
 
-## サンプルコード
+イベント購読は src/auto_sprint.cpp に実装しています。
 
-```cpp
-#include <bedrock/mod.hpp>
+    keyId_ = events.on<bedrock::KeyEvent>([this](const auto& e) {
+        if (e.virtualKey == 'W') forward_ = e.pressed;
+    });
+    updateId_ = events.on<bedrock::UpdateEvent>([this](const auto&) {
+        update();
+    });
 
-BEDROCK_MOD([](bedrock::Client& client) {
-    client.input().autoSprint();
-});
-```
+- KeyEvent：キーコード・押下/解放・リピート
+- GameplayEvent：ゲーム操作中の状態
+- FocusEvent：ウィンドウフォーカス
+- UpdateEvent：クライアント側で発行する更新通知
+- on<T> / emit<T> / off<T>：購読 / 通知 / 解除
 
-**この数行がサンプルの全機能です。** DLLの初期化、20msごとの更新、
-`manifest.json` の取得、対応バージョンへの自動切替、入力のクリーンアップは
-BedrockDynamicSDK側に移しました。
-対応外のゲームバージョンや取得エラーではModは何も変更しません。
+**UpdateEvent は Minecraft のゲームtickではありません。**
+このサンプルのWin32アダプターが20msごとにイベントを発行します。
+ネイティブのゲームTickや描画イベントは、別途検証済みのHookアダプターが必要です。
+イベント購読と発行は単一の所有スレッドで扱います。
 
-ほかのModも同様に `BEDROCK_MOD([](bedrock::Client& mc){ ... });` と書くだけ。
-`mc.version()`、`mc.inGame()`、`mc.input().down(bedrock::Key::Forward)`
-などが利用できます。既存のC++型・関数・GUIはSDKのサポート範囲内のみです。
+## ファイル構成
 
-- 実行ファイル：`BedrockAutoSprint.dll` だけ
-- SDK取得方法：CMake **FetchContent** がGitHubの `BedrockDynamicSDK` を取得
-- 使用するSDK：`<bedrock/mod.hpp>` と `bedrock::sdk`
-- PreLoader/LeviLamina/DLL追加依存なし
-- ゲーム内GUIなし、設定ファイルなし
+    src/auto_sprint.cpp       AutoSprintイベント購読とスプリント判定
+    src/win32_client.cpp      DLL起動、バージョン認識、Win32イベント発行
+    include/auto_sprint_feature.hpp
+    tests/auto_sprint_test.cpp
+    CMakeLists.txt
 
-## 実装する機能
+## CMake経由でGitHubからSDKを取得
 
-**Wキーで前進している間、自動的に左Ctrlを押してスプリント**。
-Wを離す・画面を離れる・メニューを開く・Shiftを押すと解放します。
-ゲームの移動速度を書き換えたり、スプリント状態のメモリを直接変更したりはしません。
-既定キー配置（Wと左Ctrl）向け。キー割当の変更やコントローラーは未対応。
+FetchContentを使い、クライアント内にSDKヘッダーを複製しません。
 
-## 動的バージョン対応
+    include(FetchContent)
+    FetchContent_Declare(
+        bedrock_sdk
+        GIT_REPOSITORY https://github.com/gamelist1990/BedrockDynamicSDK.git
+        GIT_TAG main
+    )
+    FetchContent_MakeAvailable(bedrock_sdk)
 
-DLLをロードすると、SDKが以下を実行します。
+    target_link_libraries(MyMod PRIVATE bedrock::events)
 
-1. 実際にロードされた `Minecraft.Windows.exe` のSHA256とPE構造を確認。
-2. GitHubの[manifest.json](https://github.com/gamelist1990/BedrockDynamicSDK/blob/main/data/manifest.json)をHTTPSで取得。
-3. 対応バージョンをハッシュとPEレイアウトの**完全一致**で選択。
-4. 同一GitHubリポジトリの `data/<version>/windows-x64.json` を取得。
-5. JSONのSHA256、対象ゲームのSHA256、必要なClientInput関数候補を検証。
-6. すべて成功した場合だけAutoSprint開始。**未対応・オフライン・不一致は何もしない。**
+bedrock::events はヘッダーオンリーで、WinHTTP/JSON/MinHook等のライブラリ依存なし。
+ゲーム版の照合が必要なら、オプションとして次をリンク：
 
-対応バージョンのJSONを追加することで、同じWindowsキー入力方式に対して
-DLLを更新せずに新バージョンを認識できます。内部ABIの互換性まで保証するものではありません。
+    target_link_libraries(MyMod PRIVATE bedrock::symbols)
+
+AutoSprintは symbols を使い、GitHub manifest.json からゲーム版に完全一致した
+data/<version>/windows-x64.jsonを取得できたときだけ動作します。
+ネットワーク障害・非対応版は何も変更しません。
+
+## AutoSprint
+
+- 既定キーWで前進、ゲームが前面かつ操作中に左Ctrlを自動で保持
+- Wを離す、Shiftを押す、メニューを開く等で解除
+- 移動速度・プレイヤー内部メモリを直接変更しない
+- Windows SendInputを使う。カスタムキーとコントローラーには未対応
 
 ## ビルド
 
-Windows x64 + Visual Studio 2022（C++/CMake）：
+Windows MSVC + CMake：
 
-```powershell
-git clone https://github.com/gamelist1990/BedrockAutoSprint.git
-cd BedrockAutoSprint
+    git clone https://github.com/gamelist1990/BedrockAutoSprint.git
+    cd BedrockAutoSprint
+    cmake -S . -B build -A x64
+    cmake --build build --config Release
+    ctest --test-dir build -C Release --output-on-failure
 
-cmake -S . -B build -A x64
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-```
-
-成果物：`build/Release/BedrockAutoSprint.dll`
-
-**ビルド時にSDKをGitHubから取得**します。通常は `main` を取得。
-互換性を確保したい場合はコミットIDまたはタグで固定：
-
-```powershell
-cmake -S . -B build -A x64 -DBEDROCK_SDK_REF=<git-tag-or-commit>
-```
-
-GitHub ActionsはWindows x64のDLLを生成し、ダウンロードできるアーティファクトとして公開します。
-LinuxではAutoSprintの入力ロジックとSDKへのリンクを検証します。
-
-## CMakeでのSDK取り込み
-
-SDKの公開型は**ビルド中に** `BedrockDynamicSDK/include/` から取り込まれます。
-
-```cmake
-include(FetchContent)
-set(BEDROCK_SDK_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-  bedrock_sdk
-  GIT_REPOSITORY https://github.com/gamelist1990/BedrockDynamicSDK.git
-  GIT_TAG main
-)
-FetchContent_MakeAvailable(bedrock_sdk)
-target_link_libraries(BedrockAutoSprint PRIVATE bedrock::sdk)
-```
-
-配布DLLにはSDKの静的ライブラリが統合されます。
-Github上でのSDK追加・修正は**次回ビルド時に**反映でき、
-ゲーム更新時のシンボルJSONは**DLL実行時に**取得します（別のタイミングです）。
-
-## 注意
-
-- このDLLは別のプロセスへの**注入機能を内蔵しません**。正規のDLLローダー等から
-  自分でロードする必要があります。
-- Minecraft本体への注入・動作試験はまだ行っていません。
-- フックを設置しないため、クライアントの未検証オフセットやvtableは使いません。
-- コード本体：`src/auto_sprint.cpp`。通常入力と判定ロジックはSDKの `<bedrock/client.hpp>` に分離。
+成果物：build/Release/BedrockAutoSprint.dll（単一DLL）。
+LinuxではイベントAPI・Modロジックのユニットテストを実施。
+**Minecraft実機へのInject・ゲーム内動作テストは未実施**です。
