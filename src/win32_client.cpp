@@ -88,10 +88,9 @@ bool initializeFileLog() {
     return true;
 }
 
-void emitInputFrameLocked() {
-    if (!activeEvents) return;
-    activeEvents->emit(InputFrameEvent{
-        gameplayActive, gameplayActive, forwardHeld, shiftHeld, ctrlHeld});
+InputFrameEvent inputFrameLocked() {
+    return InputFrameEvent{
+        gameplayActive, gameplayActive, forwardHeld, shiftHeld, ctrlHeld};
 }
 
 bool __fastcall onKeyboardFeed(int inputKey, bool down) {
@@ -100,40 +99,69 @@ bool __fastcall onKeyboardFeed(int inputKey, bool down) {
     if (!loggedFirstKey.exchange(true, std::memory_order_acq_rel))
         logger.info("Keyboard::feed active; first InputKey=", inputKey,
                     " down=", down ? 1 : 0);
-    std::lock_guard lock(eventMutex);
-    if (inputKey == kInputW) forwardHeld = down;
-    if (isShiftKey(inputKey)) {
-        for (std::size_t i = 0; i < kShiftCodes.size(); ++i)
-            if (kShiftCodes[i] == inputKey) shiftKeyDown[i] = down;
-        shiftHeld = std::any_of(shiftKeyDown.begin(), shiftKeyDown.end(), [](bool value) { return value; });
+    AutoSprintEvents* events{};
+    InputFrameEvent frame;
+    {
+        std::lock_guard lock(eventMutex);
+        if (inputKey == kInputW) forwardHeld = down;
+        if (isShiftKey(inputKey)) {
+            for (std::size_t i = 0; i < kShiftCodes.size(); ++i)
+                if (kShiftCodes[i] == inputKey) shiftKeyDown[i] = down;
+            shiftHeld = std::any_of(shiftKeyDown.begin(), shiftKeyDown.end(),
+                                    [](bool value) { return value; });
+        }
+        if (isCtrlKey(inputKey)) {
+            for (std::size_t i = 0; i < kCtrlCodes.size(); ++i)
+                if (kCtrlCodes[i] == inputKey) ctrlKeyDown[i] = down;
+            ctrlHeld = std::any_of(ctrlKeyDown.begin(), ctrlKeyDown.end(),
+                                   [](bool value) { return value; });
+        }
+        events = activeEvents;
+        frame = inputFrameLocked();
     }
-    if (isCtrlKey(inputKey)) {
-        for (std::size_t i = 0; i < kCtrlCodes.size(); ++i)
-            if (kCtrlCodes[i] == inputKey) ctrlKeyDown[i] = down;
-        ctrlHeld = std::any_of(ctrlKeyDown.begin(), ctrlKeyDown.end(), [](bool value) { return value; });
-    }
-    emitInputFrameLocked();
+    // Event handlers may inject a synthetic Keyboard::feed event, which
+    // re-enters this hook. Never emit while holding eventMutex.
+    if (events) events->emit(frame);
     return result;
 }
 
 void __fastcall onGrabCursor(void* self) {
     if (auto original = originalGrabCursor.load(std::memory_order_acquire)) original(self);
-    std::lock_guard lock(eventMutex);
-    gameplayActive = true;
+    AutoSprintEvents* events{};
+    InputFrameEvent frame;
+    bool changed{};
+    {
+        std::lock_guard lock(eventMutex);
+        changed = !gameplayActive;
+        gameplayActive = true;
+        if (!changed) return;
+        events = activeEvents;
+        frame = inputFrameLocked();
+    }
+    if (events) events->emit(frame);
     logger.info("Minecraft gameplay input active");
-    emitInputFrameLocked();
 }
 
 void __fastcall onReleaseCursor(void* self) {
+    AutoSprintEvents* events{};
+    InputFrameEvent frame;
+    bool wasActive{};
+    bool changed{};
     {
         std::lock_guard lock(eventMutex);
+        wasActive = gameplayActive;
+        changed = gameplayActive || forwardHeld || shiftHeld || ctrlHeld;
         gameplayActive = false;
-        emitInputFrameLocked();
         forwardHeld = shiftHeld = ctrlHeld = false;
         shiftKeyDown.fill(false);
         ctrlKeyDown.fill(false);
-        logger.info("Minecraft gameplay input inactive");
+        if (changed) {
+            events = activeEvents;
+            frame = inputFrameLocked();
+        }
     }
+    if (events) events->emit(frame);
+    if (wasActive) logger.info("Minecraft gameplay input inactive");
     if (auto original = originalReleaseCursor.load(std::memory_order_acquire)) original(self);
 }
 
@@ -280,6 +308,9 @@ DWORD WINAPI startClient(void*) {
         if (stopRequested.load(std::memory_order_acquire)) SetEvent(signal);
         WaitForSingleObject(signal, INFINITE);
     }
+    // Unsubscribe first: the broker drains in-flight callbacks, including any
+    // event emission after its state lock has been released.
+    removeHooks();
     {
         std::lock_guard lock(eventMutex);
         activeEvents = nullptr;
@@ -288,7 +319,6 @@ DWORD WINAPI startClient(void*) {
     // Minecraft Keyboard::feed trampoline is still available here.
     feature.reset();
     status.store(Status::Stopped);
-    removeHooks();
     originalKeyboardFeed.store(nullptr, std::memory_order_release);
     originalGrabCursor.store(nullptr, std::memory_order_release);
     originalReleaseCursor.store(nullptr, std::memory_order_release);
