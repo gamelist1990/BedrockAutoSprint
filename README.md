@@ -4,14 +4,15 @@ Minecraft Bedrock Windows x64向けAutoSprintサンプルMod。
 [BedrockDynamicSDK](https://github.com/gamelist1990/BedrockDynamicSDK) はイベントの購読・発行APIと、必要な場合のシンボル解決を提供。
 実際のスプリント入力、更新ループ、DLLエントリポイントはこの独立サンプル側で実装します。
 
-## Event APIの使用例（入力スナップショット方式）
+## Minecraftネイティブ入力
 
-以前正常動作していた実装と同じく、毎回 `GetAsyncKeyState` と
-フォーカス・カーソル状態を直接読み取り、**1フレーム分の状態を1つのイベント**
-として流します。押下・解放の変化だけを追う実装は廃止しました。
+Minecraftの検証済み `Keyboard::feed(InputKey, down)` からキー遷移を受け取り、
+Minecraft自身の同じAPIでCtrlを押下・解放します。OSのキー状態ポーリングや
+`SendInput` は使わず、ゲームプレイ中にWを押している間だけ自動スプリントします。
 
-`InputFrameEvent` はこのサンプル独自のイベント型です。
-SDK本体にはAutoSprint依存を追加しません。
+`InputFrameEvent` はサンプル内部で状態を評価するためのイベント型です。
+イベント発行元は別スレッドのポーリングループではなく、Minecraftのキー入力と
+カーソル取得/解放フックです。
 
 ```cpp
 using AutoSprintEvents = bedrock::EventBus<InputFrameEvent>;
@@ -24,25 +25,23 @@ events.on<InputFrameEvent>([this](const InputFrameEvent& frame) {
     }
 });
 
-// Win32アダプターは20msごとに現在の全入力状態を発行
+// Minecraft Keyboard::feed とカーソル状態フックから状態変化時に発行
 events.emit(InputFrameEvent{
-    minecraftFocused(), gameplayCursorHidden(),
-    keyHeld('W'), keyHeld(VK_LSHIFT) || keyHeld(VK_RSHIFT),
-    keyHeld(VK_LCONTROL)
+    gameplayActive, gameplayActive, forwardHeld, shiftHeld, leftCtrlHeld
 });
 ```
 
 **Event API自体は軽量なヘッダーオンリー**で、入力の監視とスプリントの実行は
-完全にサンプル側にあります。Win32アダプターはMinecraftネイティブの
-`TickEvent` を使うわけではありません。
+完全にサンプル側にあります。ゲーム入力は `Keyboard::feed` に集約されるため、
+キーの押しっぱなし状態も遷移イベントから追跡します。
 
-フォーカス復帰やキーを押したままModをロードした場合でも、
-スナップショットから即座に正しい状態に復帰できます。
+カーソルを取得してゲームプレイへ戻ったときは、以後のMinecraft入力イベントから
+状態を追跡します。入力イベントが発生しない間はバックグラウンドでポーリングしません。
 
 ## ファイル構成
 
     src/auto_sprint.cpp       AutoSprintイベント購読とスプリント判定
-    src/win32_client.cpp      DLL起動、バージョン認識、Win32イベント発行
+    src/win32_client.cpp      DLL起動、バージョン認識、Minecraft入力フック
     include/auto_sprint_feature.hpp
     tests/auto_sprint_test.cpp
     CMakeLists.txt
@@ -77,7 +76,8 @@ GitHubの再確認は最大1日1回で、ローカルに一致するデータが
 - 既定キーWで前進、ゲームが前面かつ操作中に左Ctrlを自動で保持
 - Wを離す、Shiftを押す、メニューを開く等で解除
 - 移動速度・プレイヤー内部メモリを直接変更しない
-- Windows SendInputを使う。カスタムキーとコントローラーには未対応
+- Minecraftのネイティブ `Keyboard::feed` を使用。カスタムキーとコントローラーには未対応
+- 診断ログ：`Documents/PEXData/AutoSprint/AutoSprint.log`
 
 ## ビルド
 

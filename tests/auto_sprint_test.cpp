@@ -19,21 +19,22 @@ int main() {
         events.emit(frame);
         events.emit(frame);
         assert(transitions.size() == 1);
+        assert(!mod.ownsSprint()); // Physical Ctrl takes over without a key-up.
 
         frame.shiftHeld = true;
         events.emit(frame);
-        assert((transitions == std::vector<bool>{true,false}));
+        assert((transitions == std::vector<bool>{true}));
         assert(!mod.ownsSprint());
         frame.shiftHeld = false;
         frame.leftCtrlHeld = true; // Physical Ctrl held by player.
         events.emit(frame);
-        assert(transitions.size() == 2);
+        assert(transitions.size() == 1);
         frame.leftCtrlHeld = false;
         events.emit(frame);
-        assert((transitions == std::vector<bool>{true,false,true}));
+        assert((transitions == std::vector<bool>{true,true}));
         frame.forwardHeld = false;
         events.emit(frame);
-        assert((transitions == std::vector<bool>{true,false,true,false}));
+        assert((transitions == std::vector<bool>{true,true,false}));
 
         frame.forwardHeld = true;
         events.emit(frame);

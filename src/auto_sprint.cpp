@@ -13,13 +13,21 @@ AutoSprintFeature::~AutoSprintFeature() {
 }
 
 void AutoSprintFeature::onInputFrame(const InputFrameEvent& frame) {
-    // Restore the known-working direct-poll condition and key ownership logic,
-    // with the input state delivered through the Event API every frame.
+    // Input snapshots are emitted only when Minecraft's own key or cursor
+    // state changes; this keeps the feature event-driven and avoids polling.
     if (frame.shouldSprint()) {
-        if (!ownSprint_ && !frame.leftCtrlHeld && send_ && send_(true))
+        if (frame.leftCtrlHeld) {
+            // The physical key has taken ownership of Ctrl. Do not release it
+            // when the sprint condition later becomes false.
+            ownSprint_ = false;
+        } else if (!ownSprint_ && send_ && send_(true)) {
             ownSprint_ = true;
+        }
     } else {
-        release();
+        if (ownSprint_ && frame.leftCtrlHeld)
+            ownSprint_ = false;
+        else
+            release();
     }
 }
 
