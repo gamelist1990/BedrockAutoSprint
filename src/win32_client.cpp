@@ -183,23 +183,8 @@ DWORD WINAPI startClient(void*) {
         return false;
     };
     bool hooksReady = installSdkHooks();
-    // A cached definition can lag the current SDK metadata; check its bundled
-    // exact-build profile before making the normal latest-definition refresh.
-    if (!hooksReady) {
-        bedrock::Resolver bundled;
-        std::string bundledError;
-        if (bundled.loadJson(bedrock::generated::kSymbolDatabase, bundledError) &&
-            bundled.attachWindowsMainModule(version.identity, bundledError) &&
-            bundled.exactBuild() &&
-            bedrock::parseNativeKeyboardLayout(
-                bedrock::generated::kSymbolDatabase, bundledError)) {
-            resolver = std::move(bundled);
-            profile = bedrock::generated::kSymbolDatabase;
-            version.source = bedrock::ProfileSource::Embedded;
-            hooksReady = installSdkHooks();
-            if (hooksReady) logger.info("using bundled exact-build native keyboard definition");
-        }
-    }
+    // A cached profile may lag the current remote definition; refresh it
+    // instead of falling back to build-time embedded symbols.
     if (!hooksReady && version.source != bedrock::ProfileSource::Remote) {
         logger.warn("Required symbols missing in cached profile; checking latest exact-build GitHub definition");
         std::string refreshedProfile;
