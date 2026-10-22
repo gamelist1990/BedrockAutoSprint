@@ -274,7 +274,12 @@ DWORD WINAPI startClient(void*) {
     std::optional<AutoSprintFeature> feature;
     feature.emplace(events, [](bool down) {
         BDS_KeyboardArgs args{kInputCtrl, down ? 1 : 0, 0};
-        return BDS_HookDispatch(BDS_HOOK_KEYBOARD_FEED, &args) != 0;
+        // BDS_HookDispatch returns no native Keyboard::feed result. The
+        // registered shared hook guarantees this dispatch path is installed;
+        // ownership tracks whether we submitted Ctrl, not the game's bool.
+        BDS_HookDispatch(BDS_HOOK_KEYBOARD_FEED, &args);
+        logger.info("Minecraft sprint Ctrl ", down ? "pressed" : "released");
+        return true;
     });
     {
         std::lock_guard lock(eventMutex);
