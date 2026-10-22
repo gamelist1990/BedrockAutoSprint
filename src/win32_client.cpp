@@ -39,6 +39,7 @@ std::array<BDS_HookToken, 3> hookTokens{};
 struct NextFrame { BDS_HookNext next{}; void* frame{}; };
 thread_local NextFrame keyboardFrame, cursorFrame;
 thread_local NextFrame* activeCursorFrame{};
+thread_local bool syntheticCtrlFeed{};
 bool __fastcall callNextKeyboard(int key, bool down) {
     BDS_KeyboardArgs args{key, down ? 1 : 0, 0};
     if (keyboardFrame.next) keyboardFrame.next(keyboardFrame.frame, &args);
@@ -53,6 +54,10 @@ void __fastcall callNextCursor(void* self) {
 bedrock::Logger logger{"AutoSprint"};
 bedrock::FileLogSink fileLog;
 std::mutex eventMutex;
+// EventBus and AutoSprintFeature are single-owner objects. Serialize callbacks
+// from concurrent Minecraft hook threads; recursive entry is needed when a
+// synthetic transition synchronously passes through Keyboard::feed again.
+std::recursive_mutex eventDispatchMutex;
 AutoSprintEvents* activeEvents{};
 bool gameplayActive{};
 bool forwardHeld{};
@@ -61,6 +66,18 @@ bool ctrlHeld{};
 std::array<bool, 5> shiftKeyDown{};
 std::array<bool, 5> ctrlKeyDown{};
 std::atomic<bool> loggedFirstKey{false};
+
+class SyntheticCtrlScope {
+public:
+    SyntheticCtrlScope() noexcept : previous_(syntheticCtrlFeed) {
+        syntheticCtrlFeed = true;
+    }
+    ~SyntheticCtrlScope() { syntheticCtrlFeed = previous_; }
+    SyntheticCtrlScope(const SyntheticCtrlScope&) = delete;
+    SyntheticCtrlScope& operator=(const SyntheticCtrlScope&) = delete;
+private:
+    bool previous_;
+};
 
 constexpr int kInputW = 'W';
 constexpr int kInputCtrl = 0x11;
@@ -99,6 +116,7 @@ bool __fastcall onKeyboardFeed(int inputKey, bool down) {
     if (!loggedFirstKey.exchange(true, std::memory_order_acq_rel))
         logger.info("Keyboard::feed active; first InputKey=", inputKey,
                     " down=", down ? 1 : 0);
+    std::lock_guard<std::recursive_mutex> dispatchLock(eventDispatchMutex);
     AutoSprintEvents* events{};
     InputFrameEvent frame;
     {
@@ -110,7 +128,7 @@ bool __fastcall onKeyboardFeed(int inputKey, bool down) {
             shiftHeld = std::any_of(shiftKeyDown.begin(), shiftKeyDown.end(),
                                     [](bool value) { return value; });
         }
-        if (isCtrlKey(inputKey)) {
+        if (isCtrlKey(inputKey) && !syntheticCtrlFeed) {
             for (std::size_t i = 0; i < kCtrlCodes.size(); ++i)
                 if (kCtrlCodes[i] == inputKey) ctrlKeyDown[i] = down;
             ctrlHeld = std::any_of(ctrlKeyDown.begin(), ctrlKeyDown.end(),
@@ -121,12 +139,13 @@ bool __fastcall onKeyboardFeed(int inputKey, bool down) {
     }
     // Event handlers may inject a synthetic Keyboard::feed event, which
     // re-enters this hook. Never emit while holding eventMutex.
-    if (events) events->emit(frame);
+    if (events && !syntheticCtrlFeed) events->emit(frame);
     return result;
 }
 
 void __fastcall onGrabCursor(void* self) {
     if (auto original = originalGrabCursor.load(std::memory_order_acquire)) original(self);
+    std::lock_guard<std::recursive_mutex> dispatchLock(eventDispatchMutex);
     AutoSprintEvents* events{};
     InputFrameEvent frame;
     bool changed{};
@@ -143,6 +162,7 @@ void __fastcall onGrabCursor(void* self) {
 }
 
 void __fastcall onReleaseCursor(void* self) {
+    std::lock_guard<std::recursive_mutex> dispatchLock(eventDispatchMutex);
     AutoSprintEvents* events{};
     InputFrameEvent frame;
     bool wasActive{};
@@ -274,11 +294,16 @@ DWORD WINAPI startClient(void*) {
     std::optional<AutoSprintFeature> feature;
     feature.emplace(events, [](bool down) {
         BDS_KeyboardArgs args{kInputCtrl, down ? 1 : 0, 0};
-        // BDS_HookDispatch returns no native Keyboard::feed result. The
-        // registered shared hook guarantees this dispatch path is installed;
-        // ownership tracks whether we submitted Ctrl, not the game's bool.
-        BDS_HookDispatch(BDS_HOOK_KEYBOARD_FEED, &args);
+        // Keep native input on the current Minecraft hook thread. Mark the
+        // synchronous nested callback so it doesn't treat our Ctrl event as
+        // physical input or recursively emit another AutoSprint event.
+        {
+            SyntheticCtrlScope syntheticScope;
+            BDS_HookDispatch(BDS_HOOK_KEYBOARD_FEED, &args);
+        }
         logger.info("Minecraft sprint Ctrl ", down ? "pressed" : "released");
+        // BDS_HookDispatch has no native Keyboard::feed result contract;
+        // ownership tracks whether we submitted the transition.
         return true;
     });
     {
