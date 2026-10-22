@@ -66,9 +66,11 @@ bedrock::events はヘッダーオンリーで、WinHTTP/JSON/MinHook等のラ�
 
     target_link_libraries(MyMod PRIVATE bedrock::symbols)
 
-AutoSprintは symbols を使い、GitHub manifest.json からゲーム版に完全一致した
-data/<version>/windows-x64.jsonを取得できたときだけ動作します。
-ネットワーク障害・非対応版は何も変更しません。
+AutoSprintは symbols を使い、ゲーム実行ファイルのハッシュが一致する検証済み
+プロファイルだけで動作します。プロファイルは `%LOCALAPPDATA%\PEXData\BedrockDynamicSDK\profile-cache`
+でTabList、Zoom、MouseChatterと共有し、キャッシュ／DLL内蔵データを優先します。
+GitHubの再確認は最大1日1回で、ローカルに一致するデータがない新バージョンだけ初回取得します。
+対応プロファイルが見つからない場合は何も変更しません。
 
 ## AutoSprint
 

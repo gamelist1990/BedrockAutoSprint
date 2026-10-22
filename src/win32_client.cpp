@@ -86,7 +86,8 @@ DWORD WINAPI startClient(void*) {
     AutoSprintEvents events;
     AutoSprintFeature feature(events, &sendCtrl);
     status.store(Status::Running);
-    logger.info("AutoSprint ready on Minecraft ", version.version);
+    logger.info("AutoSprint ready on Minecraft ", version.version, " [",
+                bedrock::profileSourceName(version.source), "]");
     while (!stopRequested.load(std::memory_order_acquire)) {
         const bool focused = clientFocused();
         const bool cursorHidden = gameplayInputActive();
