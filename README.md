@@ -1,5 +1,8 @@
 # BedrockAutoSprint
 
+Windows配布物は `BedrockAutoSprint.dll` 単体です。SDK hook runtimeとMinHookはDLL内に静的同封され、他のSDK製Modとはプロセス内でHook所有権を共有します。
+SDK共有ランタイムが他のBedrockDynamicSDK対応ModとMinecraft hookを共用します。
+
 Minecraft Bedrock Windows x64向けAutoSprintサンプルMod。
 [BedrockDynamicSDK](https://github.com/gamelist1990/BedrockDynamicSDK) はイベントの購読・発行APIと、必要な場合のシンボル解決を提供。
 実際のスプリント入力、更新ループ、DLLエントリポイントはこの独立サンプル側で実装します。
@@ -77,7 +80,7 @@ GitHubの再確認は最大1日1回で、ローカルに一致するデータが
 - Wを離す、Shiftを押す、メニューを開く等で解除
 - 移動速度・プレイヤー内部メモリを直接変更しない
 - Minecraftのネイティブ `Keyboard::feed` を使用。カスタムキーとコントローラーには未対応
-- 診断ログ：`Documents/PEXData/AutoSprint/AutoSprint.log`
+- 診断ログ：`Documents/PEXData/AutoSprint/AutoSprint.log`（起動時に前回履歴をクリア）
 
 ## ビルド
 

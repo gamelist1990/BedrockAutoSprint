@@ -4,12 +4,13 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#include <MinHook.h>
+#include <bedrock/hook_runtime.h>
 #include <bedrock/events.hpp>
 #include <bedrock/remote_catalog.hpp>
 #include <bedrock/resolver.hpp>
 #include <bedrock/console.hpp>
 #include <bedrock/logger.hpp>
+#include <bedrock/file_log_sink.hpp>
 #include "auto_sprint_feature.hpp"
 #include <array>
 #include <algorithm>
@@ -34,11 +35,23 @@ using CursorFn = void(__fastcall*)(void*);
 std::atomic<KeyboardFeedFn> originalKeyboardFeed{nullptr};
 std::atomic<CursorFn> originalGrabCursor{nullptr};
 std::atomic<CursorFn> originalReleaseCursor{nullptr};
-std::array<void*, 3> hookTargets{};
-bool ownsMinHook = false;
+std::array<BDS_HookToken, 3> hookTokens{};
+struct NextFrame { BDS_HookNext next{}; void* frame{}; };
+thread_local NextFrame keyboardFrame, cursorFrame;
+thread_local NextFrame* activeCursorFrame{};
+bool __fastcall callNextKeyboard(int key, bool down) {
+    BDS_KeyboardArgs args{key, down ? 1 : 0, 0};
+    if (keyboardFrame.next) keyboardFrame.next(keyboardFrame.frame, &args);
+    else BDS_HookDispatch(BDS_HOOK_KEYBOARD_FEED, &args);
+    return args.result != 0;
+}
+void __fastcall callNextCursor(void* self) {
+    if (activeCursorFrame && activeCursorFrame->next) {
+        BDS_CursorArgs args{self}; activeCursorFrame->next(activeCursorFrame->frame, &args);
+    }
+}
 bedrock::Logger logger{"AutoSprint"};
-std::mutex logMutex;
-std::ofstream logFile;
+bedrock::FileLogSink fileLog;
 std::mutex eventMutex;
 AutoSprintEvents* activeEvents{};
 bool gameplayActive{};
@@ -70,19 +83,8 @@ bool initializeFileLog() {
     userProfile.resize(length);
     const auto directory = std::filesystem::path(userProfile) / L"Documents" /
         L"PEXData" / L"AutoSprint";
-    std::error_code error;
-    std::filesystem::create_directories(directory, error);
-    if (error) return false;
-    logFile.open(directory / L"AutoSprint.log", std::ios::binary | std::ios::app);
-    if (!logFile) return false;
-    logger.setSink([](bedrock::LogLevel, std::string_view line, void*) {
-        std::lock_guard lock(logMutex);
-        OutputDebugStringA(std::string(line).c_str());
-        if (logFile) {
-            logFile.write(line.data(), static_cast<std::streamsize>(line.size()));
-            logFile.flush();
-        }
-    });
+    if (!fileLog.open(directory / L"AutoSprint.log")) return false;
+    fileLog.attach(logger);
     return true;
 }
 
@@ -135,21 +137,26 @@ void __fastcall onReleaseCursor(void* self) {
     if (auto original = originalReleaseCursor.load(std::memory_order_acquire)) original(self);
 }
 
-template <class Original>
-bool createHook(void* target, void* detour, std::atomic<Original>& original) {
-    Original captured = nullptr;
-    if (MH_CreateHook(target, detour, reinterpret_cast<void**>(&captured)) != MH_OK)
-        return false;
-    original.store(captured, std::memory_order_release);
-    return true;
+void BDS_HOOK_CALL keyboardMiddleware(void*, void* raw, BDS_HookNext next, void* frame) {
+    auto* args = static_cast<BDS_KeyboardArgs*>(raw);
+    const auto old = keyboardFrame; keyboardFrame = {next, frame};
+    args->result = onKeyboardFeed(args->key, args->down != 0) ? 1 : 0;
+    keyboardFrame = old;
+}
+void BDS_HOOK_CALL cursorMiddleware(void* user, void* raw, BDS_HookNext next, void* frame) {
+    auto* args = static_cast<BDS_CursorArgs*>(raw);
+    const bool grabbing = reinterpret_cast<std::uintptr_t>(user) == 1;
+    const auto oldFrame = cursorFrame; cursorFrame = {next, frame};
+    const auto oldActive = activeCursorFrame; activeCursorFrame = &cursorFrame;
+    if (grabbing) onGrabCursor(args->self); else onReleaseCursor(args->self);
+    activeCursorFrame = oldActive; cursorFrame = oldFrame;
 }
 
 void removeHooks() noexcept {
-    for (void* target : hookTargets) if (target) MH_DisableHook(target);
-    for (void* target : hookTargets) if (target) MH_RemoveHook(target);
-    hookTargets.fill(nullptr);
-    if (ownsMinHook) MH_Uninitialize();
-    ownsMinHook = false;
+    for (auto& token : hookTokens) {
+        if (token) BDS_HookUnsubscribe(token);
+        token = nullptr;
+    }
 }
 
 DWORD WINAPI startClient(void*) {
@@ -192,16 +199,14 @@ DWORD WINAPI startClient(void*) {
     }
     logger.info("resolver attached to exact Minecraft build");
     std::optional<bedrock::Resolution> keyboard, grab, release;
-    const auto exact = [](const auto& symbol) {
-        return symbol && symbol->exact_build && symbol->method == "exact-rva";
-    };
     const auto resolveRequired = [&] {
-        keyboard = resolver.resolve("Keyboard::feed");
-        grab = resolver.resolve("ClientInstance::grabCursor", true);
-        release = resolver.resolve("ClientInstance::releaseCursor", true);
+        keyboard = bedrock::resolveSharedHook(resolver, "Keyboard::feed", BDS_HOOK_KEYBOARD_FEED);
+        grab = bedrock::resolveSharedHook(resolver, "ClientInstance::grabCursor", BDS_HOOK_GRAB_CURSOR);
+        release = bedrock::resolveSharedHook(resolver, "ClientInstance::releaseCursor", BDS_HOOK_RELEASE_CURSOR);
     };
+    const auto valid = [](const auto& symbol) { return symbol && symbol->exact_build && symbol->verified; };
     const auto requirementsMet = [&] {
-        return exact(keyboard) && keyboard->verified && exact(grab) && exact(release);
+        return valid(keyboard) && valid(grab) && valid(release);
     };
     resolveRequired();
     if (!requirementsMet() && version.source != bedrock::ProfileSource::Remote) {
@@ -232,24 +237,14 @@ DWORD WINAPI startClient(void*) {
         return 0;
     }
 
-    hookTargets[0] = reinterpret_cast<void*>(keyboard->address);
-    hookTargets[1] = reinterpret_cast<void*>(grab->address);
-    hookTargets[2] = reinterpret_cast<void*>(release->address);
-    logger.info("MinHook initialize");
-    const MH_STATUS initialized = MH_Initialize();
-    if (initialized != MH_OK && initialized != MH_ERROR_ALREADY_INITIALIZED) {
-        logger.error("MinHook initialization failed: ", static_cast<int>(initialized));
-        status.store(Status::Failed);
-        return 1;
-    }
-    ownsMinHook = initialized == MH_OK;
-
+    originalKeyboardFeed.store(&callNextKeyboard);
+    originalGrabCursor.store(&callNextCursor);
+    originalReleaseCursor.store(&callNextCursor);
     AutoSprintEvents events;
     std::optional<AutoSprintFeature> feature;
     feature.emplace(events, [](bool down) {
-        if (auto original = originalKeyboardFeed.load(std::memory_order_acquire))
-            return original(kInputCtrl, down);
-        return false;
+        BDS_KeyboardArgs args{kInputCtrl, down ? 1 : 0, 0};
+        return BDS_HookDispatch(BDS_HOOK_KEYBOARD_FEED, &args) != 0;
     });
     {
         std::lock_guard lock(eventMutex);
@@ -257,33 +252,20 @@ DWORD WINAPI startClient(void*) {
         gameplayActive = forwardHeld = shiftHeld = ctrlHeld = false;
     }
     const bool created =
-        createHook(hookTargets[0], reinterpret_cast<void*>(&onKeyboardFeed), originalKeyboardFeed) &&
-        createHook(hookTargets[1], reinterpret_cast<void*>(&onGrabCursor), originalGrabCursor) &&
-        createHook(hookTargets[2], reinterpret_cast<void*>(&onReleaseCursor), originalReleaseCursor);
+        BDS_HookSubscribe(BDS_HOOK_KEYBOARD_FEED, reinterpret_cast<void*>(keyboard->address), keyboardMiddleware, nullptr, &hookTokens[0]) &&
+        BDS_HookSubscribe(BDS_HOOK_GRAB_CURSOR, reinterpret_cast<void*>(grab->address), cursorMiddleware, reinterpret_cast<void*>(1), &hookTokens[1]) &&
+        BDS_HookSubscribe(BDS_HOOK_RELEASE_CURSOR, reinterpret_cast<void*>(release->address), cursorMiddleware, nullptr, &hookTokens[2]);
     if (!created) {
         {
             std::lock_guard lock(eventMutex);
             activeEvents = nullptr;
         }
         removeHooks();
-        logger.error("Could not create Minecraft input hooks");
+        logger.error("Could not subscribe to the shared Minecraft hook runtime");
         status.store(Status::Failed);
         return 1;
     }
-    logger.info("Minecraft input hooks created");
-    bool queued = true;
-    for (void* target : hookTargets) queued = queued && MH_QueueEnableHook(target) == MH_OK;
-    if (!queued || MH_ApplyQueued() != MH_OK) {
-        {
-            std::lock_guard lock(eventMutex);
-            activeEvents = nullptr;
-        }
-        removeHooks();
-        logger.error("Could not enable Minecraft input hooks");
-        status.store(Status::Failed);
-        return 1;
-    }
-    logger.info("Minecraft input hooks enabled");
+    logger.info("Minecraft input hooks registered with shared runtime");
     status.store(Status::Running);
     logger.info("AutoSprint ready on Minecraft ", version.version, " [",
                 bedrock::profileSourceName(version.source), "]");

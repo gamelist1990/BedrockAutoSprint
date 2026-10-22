@@ -24,31 +24,20 @@ FetchContent_MakeAvailable(bedrock_sdk)
 # Standalone DLL: linked SDK implementation is STATIC. Only Windows system
 # dependencies (WinHTTP, BCrypt and standard system DLLs) remain.
 if(WIN32)
-    add_library(bedrock_autosprint_minhook STATIC
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/buffer.c
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/hook.c
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/trampoline.c
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/hde/hde64.c
-    )
-    target_include_directories(bedrock_autosprint_minhook PUBLIC
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/include)
-    target_include_directories(bedrock_autosprint_minhook PRIVATE
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src
-        ${bedrock_sdk_SOURCE_DIR}/third_party/minhook-vendor/src/hde)
-
     add_library(BedrockAutoSprint SHARED src/auto_sprint.cpp src/win32_client.cpp)
     target_include_directories(BedrockAutoSprint PRIVATE include)
     option(BEDROCK_AUTOSPRINT_DEBUG_CONSOLE
         "Open optional Win32 console to show debug logs" OFF)
     target_link_libraries(BedrockAutoSprint PRIVATE
-        bedrock::events bedrock::symbols bedrock::logging bedrock_autosprint_minhook)
+        bedrock::events bedrock::symbols bedrock::logging bedrock::hook_runtime)
+    bedrock_enable_hook_runtime(BedrockAutoSprint)
     if(BEDROCK_AUTOSPRINT_DEBUG_CONSOLE)
         target_compile_definitions(BedrockAutoSprint PRIVATE
             BEDROCK_AUTOSPRINT_DEBUG_CONSOLE=1)
     endif()
     target_compile_features(BedrockAutoSprint PRIVATE cxx_std_20)
     if(MSVC)
-        foreach(target bedrock_autosprint_minhook BedrockAutoSprint)
+        foreach(target BedrockAutoSprint)
             set_property(TARGET ${target} PROPERTY MSVC_RUNTIME_LIBRARY
                 "MultiThreaded$<$<CONFIG:Debug>:Debug>")
         endforeach()
