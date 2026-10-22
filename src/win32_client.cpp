@@ -204,7 +204,9 @@ DWORD WINAPI startClient(void*) {
         grab = bedrock::resolveSharedHook(resolver, "ClientInstance::grabCursor", BDS_HOOK_GRAB_CURSOR);
         release = bedrock::resolveSharedHook(resolver, "ClientInstance::releaseCursor", BDS_HOOK_RELEASE_CURSOR);
     };
-    const auto valid = [](const auto& symbol) { return symbol && symbol->exact_build && symbol->verified; };
+    const auto valid = [](const auto& symbol) {
+        return symbol && bedrock::isUsableSharedHookResolution(*symbol);
+    };
     const auto requirementsMet = [&] {
         return valid(keyboard) && valid(grab) && valid(release);
     };
