@@ -9,8 +9,10 @@ Minecraft Bedrock Windows x64向けAutoSprintサンプルMod。
 
 ## Minecraftネイティブ入力
 
-Minecraftの検証済み `Keyboard::feed(InputKey, down)` からキー遷移を受け取り、
-Minecraft自身の同じAPIでCtrlを押下・解放します。OSのキー状態ポーリングや
+Minecraftの検証済み `GameCore::keyboardEvent` からキー遷移を受け取り、
+SDKの `NativeKeyboardInput` を通して実際の `HIDController::onKeyDown/onKeyUp`
+でCtrlを押下・解放します。`Keyboard::feed` はキーイベントの事前処理で、
+それだけを呼んでも移動入力になりません。OSのキー状態ポーリングや
 `SendInput` は使わず、ゲームプレイ中にWを押している間だけ自動スプリントします。
 
 `InputFrameEvent` はサンプル内部で状態を評価するためのイベント型です。
@@ -28,15 +30,17 @@ events.on<InputFrameEvent>([this](const InputFrameEvent& frame) {
     }
 });
 
-// Minecraft Keyboard::feed とカーソル状態フックから状態変化時に発行
+// Minecraft native keyboard callback とカーソル状態フックから発行
 events.emit(InputFrameEvent{
     gameplayActive, gameplayActive, forwardHeld, shiftHeld, leftCtrlHeld
 });
 ```
 
 **Event API自体は軽量なヘッダーオンリー**で、入力の監視とスプリントの実行は
-完全にサンプル側にあります。ゲーム入力は `Keyboard::feed` に集約されるため、
-キーの押しっぱなし状態も遷移イベントから追跡します。
+完全にサンプル側にあります。キーの押しっぱなし状態はネイティブイベントから追跡し、
+生成したCtrlは物理入力と区別します。コールバックの配置と仮想関数slotは対応版の
+JSONから読みます。古いキャッシュに必要な定義がない場合はDLL内の完全一致定義を
+先に試すため、同じ版ならGitHubの再取得を待たずに起動できます。
 
 カーソルを取得してゲームプレイへ戻ったときは、以後のMinecraft入力イベントから
 状態を追跡します。入力イベントが発生しない間はバックグラウンドでポーリングしません。
@@ -79,7 +83,7 @@ GitHubの再確認は最大1日1回で、ローカルに一致するデータが
 - 既定キーWで前進、ゲームが前面かつ操作中に左Ctrlを自動で保持
 - Wを離す、Shiftを押す、メニューを開く等で解除
 - 移動速度・プレイヤー内部メモリを直接変更しない
-- Minecraftのネイティブ `Keyboard::feed` を使用。カスタムキーとコントローラーには未対応
+- Minecraftのネイティブ `HIDController::onKeyDown/onKeyUp` を使用。カスタムキーとコントローラーには未対応
 - 診断ログ：`Documents/PEXData/AutoSprint/AutoSprint.log`（起動時に前回履歴をクリア）
 
 ## ビルド

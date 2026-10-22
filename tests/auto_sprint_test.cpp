@@ -15,7 +15,11 @@ int main() {
         events.emit(frame);
         assert((transitions == std::vector<bool>{true}));
         assert(mod.ownsSprint());
-        frame.leftCtrlHeld = true; // Our injected Ctrl now appears held.
+        // Repeated W snapshots must keep native Ctrl held without pulsing it.
+        events.emit(frame);
+        events.emit(frame);
+        assert(transitions.size() == 1 && mod.ownsSprint());
+        frame.leftCtrlHeld = true; // A real physical Ctrl takes ownership.
         events.emit(frame);
         events.emit(frame);
         assert(transitions.size() == 1);

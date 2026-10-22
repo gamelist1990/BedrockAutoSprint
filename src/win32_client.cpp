@@ -1,10 +1,12 @@
 #ifdef _WIN32
 // Adapt verified Minecraft input events into the sample feature. No OS key
-// polling or SendInput is used; generated Ctrl transitions use Keyboard::feed.
+// polling or SendInput is used; Ctrl uses the native HIDController input route.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <bedrock/hook_runtime.h>
+#include <bedrock/native_keyboard.hpp>
+#include <bedrock/generated_symbols.hpp>
 #include <bedrock/events.hpp>
 #include <bedrock/remote_catalog.hpp>
 #include <bedrock/resolver.hpp>
@@ -30,22 +32,21 @@ enum class Status : unsigned {
 std::atomic<Status> status{Status::NotStarted};
 std::atomic<bool> stopRequested{false};
 std::atomic<HANDLE> stopEvent{nullptr};
-using KeyboardFeedFn = bool(__fastcall*)(int, bool);
+using KeyboardEventFn = void*(__fastcall*)(void*, void*, void*);
 using CursorFn = void(__fastcall*)(void*);
-std::atomic<KeyboardFeedFn> originalKeyboardFeed{nullptr};
+KeyboardEventFn originalKeyboardEvent{};
+bedrock::NativeKeyboardLayout keyboardLayout;
+bedrock::NativeKeyboardInput nativeKeyboard;
+std::atomic<bool> observeKeyboard{false};
+// The SDK pins this DLL. Keep the native callback hook as a pass-through on
+// stop, so no in-flight callback can return through a freed trampoline.
+BDS_HookToken keyboardHookToken{};
 std::atomic<CursorFn> originalGrabCursor{nullptr};
 std::atomic<CursorFn> originalReleaseCursor{nullptr};
-std::array<BDS_HookToken, 3> hookTokens{};
+std::array<BDS_HookToken, 2> hookTokens{};
 struct NextFrame { BDS_HookNext next{}; void* frame{}; };
-thread_local NextFrame keyboardFrame, cursorFrame;
+thread_local NextFrame cursorFrame;
 thread_local NextFrame* activeCursorFrame{};
-thread_local bool syntheticCtrlFeed{};
-bool __fastcall callNextKeyboard(int key, bool down) {
-    BDS_KeyboardArgs args{key, down ? 1 : 0, 0};
-    if (keyboardFrame.next) keyboardFrame.next(keyboardFrame.frame, &args);
-    else BDS_HookDispatch(BDS_HOOK_KEYBOARD_FEED, &args);
-    return args.result != 0;
-}
 void __fastcall callNextCursor(void* self) {
     if (activeCursorFrame && activeCursorFrame->next) {
         BDS_CursorArgs args{self}; activeCursorFrame->next(activeCursorFrame->frame, &args);
@@ -54,9 +55,7 @@ void __fastcall callNextCursor(void* self) {
 bedrock::Logger logger{"AutoSprint"};
 bedrock::FileLogSink fileLog;
 std::mutex eventMutex;
-// EventBus and AutoSprintFeature are single-owner objects. Serialize callbacks
-// from concurrent Minecraft hook threads; recursive entry is needed when a
-// synthetic transition synchronously passes through Keyboard::feed again.
+// Serialize feature state across native input and cursor callbacks.
 std::recursive_mutex eventDispatchMutex;
 AutoSprintEvents* activeEvents{};
 bool gameplayActive{};
@@ -66,18 +65,6 @@ bool ctrlHeld{};
 std::array<bool, 5> shiftKeyDown{};
 std::array<bool, 5> ctrlKeyDown{};
 std::atomic<bool> loggedFirstKey{false};
-
-class SyntheticCtrlScope {
-public:
-    SyntheticCtrlScope() noexcept : previous_(syntheticCtrlFeed) {
-        syntheticCtrlFeed = true;
-    }
-    ~SyntheticCtrlScope() { syntheticCtrlFeed = previous_; }
-    SyntheticCtrlScope(const SyntheticCtrlScope&) = delete;
-    SyntheticCtrlScope& operator=(const SyntheticCtrlScope&) = delete;
-private:
-    bool previous_;
-};
 
 constexpr int kInputW = 'W';
 constexpr int kInputCtrl = 0x11;
@@ -110,17 +97,31 @@ InputFrameEvent inputFrameLocked() {
         gameplayActive, gameplayActive, forwardHeld, shiftHeld, ctrlHeld};
 }
 
-bool __fastcall onKeyboardFeed(int inputKey, bool down) {
-    const auto original = originalKeyboardFeed.load(std::memory_order_acquire);
-    const bool result = original ? original(inputKey, down) : false;
+void* __fastcall onKeyboardEvent(void* self, void* output, void* context) {
+    // The complete callback feeds HIDController after the UI prefilter. Let
+    // the real W transition reach Minecraft first, then submit native Ctrl.
+    // Older embedded brokers published the trampoline just after enabling the
+    // patch. Handle that small install window without calling a null pointer.
+    const auto original = originalKeyboardEvent;
+    if (!original) {
+        static_cast<std::byte*>(output)[8] = std::byte{0};
+        return output;
+    }
+    auto* result = original(self, output, context);
+    if (!observeKeyboard.load(std::memory_order_acquire)) return result;
+    const auto input = bedrock::captureNativeKeyboardEvent(context, keyboardLayout);
+    if (!input) return result;
+    const int inputKey = input->key;
+    const bool down = input->down;
     if (!loggedFirstKey.exchange(true, std::memory_order_acq_rel))
-        logger.info("Keyboard::feed active; first InputKey=", inputKey,
+        logger.info("native HIDController route active; first InputKey=", inputKey,
                     " down=", down ? 1 : 0);
     std::lock_guard<std::recursive_mutex> dispatchLock(eventDispatchMutex);
     AutoSprintEvents* events{};
     InputFrameEvent frame;
     {
         std::lock_guard lock(eventMutex);
+        nativeKeyboard = input->input;
         if (inputKey == kInputW) forwardHeld = down;
         if (isShiftKey(inputKey)) {
             for (std::size_t i = 0; i < kShiftCodes.size(); ++i)
@@ -128,7 +129,7 @@ bool __fastcall onKeyboardFeed(int inputKey, bool down) {
             shiftHeld = std::any_of(shiftKeyDown.begin(), shiftKeyDown.end(),
                                     [](bool value) { return value; });
         }
-        if (isCtrlKey(inputKey) && !syntheticCtrlFeed) {
+        if (isCtrlKey(inputKey)) {
             for (std::size_t i = 0; i < kCtrlCodes.size(); ++i)
                 if (kCtrlCodes[i] == inputKey) ctrlKeyDown[i] = down;
             ctrlHeld = std::any_of(ctrlKeyDown.begin(), ctrlKeyDown.end(),
@@ -137,9 +138,9 @@ bool __fastcall onKeyboardFeed(int inputKey, bool down) {
         events = activeEvents;
         frame = inputFrameLocked();
     }
-    // Event handlers may inject a synthetic Keyboard::feed event, which
-    // re-enters this hook. Never emit while holding eventMutex.
-    if (events && !syntheticCtrlFeed) events->emit(frame);
+    // Native HID calls do not re-enter the raw callback or impersonate a
+    // physical Ctrl transition. Never emit while holding eventMutex.
+    if (events) events->emit(frame);
     return result;
 }
 
@@ -162,34 +163,29 @@ void __fastcall onGrabCursor(void* self) {
 }
 
 void __fastcall onReleaseCursor(void* self) {
-    std::lock_guard<std::recursive_mutex> dispatchLock(eventDispatchMutex);
-    AutoSprintEvents* events{};
-    InputFrameEvent frame;
-    bool wasActive{};
-    bool changed{};
     {
-        std::lock_guard lock(eventMutex);
-        wasActive = gameplayActive;
-        changed = gameplayActive || forwardHeld || shiftHeld || ctrlHeld;
-        gameplayActive = false;
-        forwardHeld = shiftHeld = ctrlHeld = false;
-        shiftKeyDown.fill(false);
-        ctrlKeyDown.fill(false);
-        if (changed) {
-            events = activeEvents;
-            frame = inputFrameLocked();
+        std::lock_guard<std::recursive_mutex> dispatchLock(eventDispatchMutex);
+        AutoSprintEvents* events{};
+        InputFrameEvent frame;
+        bool wasActive{};
+        bool changed{};
+        {
+            std::lock_guard lock(eventMutex);
+            wasActive = gameplayActive;
+            changed = gameplayActive || forwardHeld || shiftHeld || ctrlHeld;
+            gameplayActive = false;
+            forwardHeld = shiftHeld = ctrlHeld = false;
+            shiftKeyDown.fill(false);
+            ctrlKeyDown.fill(false);
+            if (changed) {
+                events = activeEvents;
+                frame = inputFrameLocked();
+            }
         }
+        if (events) events->emit(frame);
+        if (wasActive) logger.info("Minecraft gameplay input inactive");
     }
-    if (events) events->emit(frame);
-    if (wasActive) logger.info("Minecraft gameplay input inactive");
     if (auto original = originalReleaseCursor.load(std::memory_order_acquire)) original(self);
-}
-
-void BDS_HOOK_CALL keyboardMiddleware(void*, void* raw, BDS_HookNext next, void* frame) {
-    auto* args = static_cast<BDS_KeyboardArgs*>(raw);
-    const auto old = keyboardFrame; keyboardFrame = {next, frame};
-    args->result = onKeyboardFeed(args->key, args->down != 0) ? 1 : 0;
-    keyboardFrame = old;
 }
 void BDS_HOOK_CALL cursorMiddleware(void* user, void* raw, BDS_HookNext next, void* frame) {
     auto* args = static_cast<BDS_CursorArgs*>(raw);
@@ -248,7 +244,7 @@ DWORD WINAPI startClient(void*) {
     logger.info("resolver attached to exact Minecraft build");
     std::optional<bedrock::Resolution> keyboard, grab, release;
     const auto resolveRequired = [&] {
-        keyboard = bedrock::resolveSharedHook(resolver, "Keyboard::feed", BDS_HOOK_KEYBOARD_FEED);
+        keyboard = resolver.resolve("GameCore::keyboardEvent");
         grab = bedrock::resolveSharedHook(resolver, "ClientInstance::grabCursor", BDS_HOOK_GRAB_CURSOR);
         release = bedrock::resolveSharedHook(resolver, "ClientInstance::releaseCursor", BDS_HOOK_RELEASE_CURSOR);
     };
@@ -256,9 +252,28 @@ DWORD WINAPI startClient(void*) {
         return symbol && bedrock::isUsableSharedHookResolution(*symbol);
     };
     const auto requirementsMet = [&] {
-        return valid(keyboard) && valid(grab) && valid(release);
+        return valid(keyboard) && valid(grab) && valid(release) &&
+            bedrock::parseNativeKeyboardLayout(profile, error).has_value();
     };
     resolveRequired();
+    // An old, otherwise valid cache can lack the new native route. Use the
+    // bundled exact-build definition before requesting another GitHub refresh.
+    if (!requirementsMet()) {
+        bedrock::Resolver bundled;
+        std::string bundledError;
+        if (bundled.loadJson(bedrock::generated::kSymbolDatabase, bundledError) &&
+            bundled.attachWindowsMainModule(version.identity, bundledError) &&
+            bundled.exactBuild() &&
+            bundled.resolve("GameCore::keyboardEvent") &&
+            bedrock::parseNativeKeyboardLayout(
+                bedrock::generated::kSymbolDatabase, bundledError)) {
+            resolver = std::move(bundled);
+            profile = bedrock::generated::kSymbolDatabase;
+            version.source = bedrock::ProfileSource::Embedded;
+            resolveRequired();
+            logger.info("using bundled exact-build native keyboard definition");
+        }
+    }
     if (!requirementsMet() && version.source != bedrock::ProfileSource::Remote) {
         logger.warn("Required symbols missing in cached profile; checking latest exact-build GitHub definition");
         std::string refreshedProfile;
@@ -287,23 +302,19 @@ DWORD WINAPI startClient(void*) {
         return 0;
     }
 
-    originalKeyboardFeed.store(&callNextKeyboard);
+    keyboardLayout = *bedrock::parseNativeKeyboardLayout(profile, error);
     originalGrabCursor.store(&callNextCursor);
     originalReleaseCursor.store(&callNextCursor);
     AutoSprintEvents events;
     std::optional<AutoSprintFeature> feature;
     feature.emplace(events, [](bool down) {
-        BDS_KeyboardArgs args{kInputCtrl, down ? 1 : 0, 0};
-        // Keep native input on the current Minecraft hook thread. Mark the
-        // synchronous nested callback so it doesn't treat our Ctrl event as
-        // physical input or recursively emit another AutoSprint event.
+        bedrock::NativeKeyboardInput input;
         {
-            SyntheticCtrlScope syntheticScope;
-            BDS_HookDispatch(BDS_HOOK_KEYBOARD_FEED, &args);
+            std::lock_guard lock(eventMutex);
+            input = nativeKeyboard;
         }
-        logger.info("Minecraft sprint Ctrl ", down ? "pressed" : "released");
-        // BDS_HookDispatch has no native Keyboard::feed result contract;
-        // ownership tracks whether we submitted the transition.
+        if (!input.send(kInputCtrl, down)) return false;
+        logger.info("HIDController::", down ? "onKeyDown" : "onKeyUp", " Ctrl");
         return true;
     });
     {
@@ -311,11 +322,15 @@ DWORD WINAPI startClient(void*) {
         activeEvents = &events;
         gameplayActive = forwardHeld = shiftHeld = ctrlHeld = false;
     }
+    observeKeyboard.store(true, std::memory_order_release);
     const bool created =
-        BDS_HookSubscribe(BDS_HOOK_KEYBOARD_FEED, reinterpret_cast<void*>(keyboard->address), keyboardMiddleware, nullptr, &hookTokens[0]) &&
-        BDS_HookSubscribe(BDS_HOOK_GRAB_CURSOR, reinterpret_cast<void*>(grab->address), cursorMiddleware, reinterpret_cast<void*>(1), &hookTokens[1]) &&
-        BDS_HookSubscribe(BDS_HOOK_RELEASE_CURSOR, reinterpret_cast<void*>(release->address), cursorMiddleware, nullptr, &hookTokens[2]);
+        BDS_HookSubscribe(BDS_HOOK_GRAB_CURSOR, reinterpret_cast<void*>(grab->address), cursorMiddleware, reinterpret_cast<void*>(1), &hookTokens[0]) &&
+        BDS_HookSubscribe(BDS_HOOK_RELEASE_CURSOR, reinterpret_cast<void*>(release->address), cursorMiddleware, nullptr, &hookTokens[1]) &&
+        BDS_HookDirectInstall(reinterpret_cast<void*>(keyboard->address),
+            reinterpret_cast<void*>(&onKeyboardEvent),
+            reinterpret_cast<void**>(&originalKeyboardEvent), &keyboardHookToken);
     if (!created) {
+        observeKeyboard.store(false, std::memory_order_release);
         {
             std::lock_guard lock(eventMutex);
             activeEvents = nullptr;
@@ -325,7 +340,7 @@ DWORD WINAPI startClient(void*) {
         status.store(Status::Failed);
         return 1;
     }
-    logger.info("Minecraft input hooks registered with shared runtime");
+    logger.info("native keyboard route and shared cursor hooks registered");
     status.store(Status::Running);
     logger.info("AutoSprint ready on Minecraft ", version.version, " [",
                 bedrock::profileSourceName(version.source), "]");
@@ -340,16 +355,17 @@ DWORD WINAPI startClient(void*) {
     }
     // Unsubscribe first: the broker drains in-flight callbacks, including any
     // event emission after its state lock has been released.
+    observeKeyboard.store(false, std::memory_order_release);
     removeHooks();
     {
-        std::lock_guard lock(eventMutex);
-        activeEvents = nullptr;
+        std::lock_guard<std::recursive_mutex> dispatchLock(eventDispatchMutex);
+        {
+            std::lock_guard lock(eventMutex);
+            activeEvents = nullptr;
+        }
+        feature.reset();
     }
-    // Feature releases only the Ctrl transition it generated; the original
-    // Minecraft Keyboard::feed trampoline is still available here.
-    feature.reset();
     status.store(Status::Stopped);
-    originalKeyboardFeed.store(nullptr, std::memory_order_release);
     originalGrabCursor.store(nullptr, std::memory_order_release);
     originalReleaseCursor.store(nullptr, std::memory_order_release);
     stopEvent.store(nullptr, std::memory_order_release);
