@@ -1,5 +1,5 @@
 #pragma once
-#include <bedrock/events.hpp>
+#include <bedrock/api/events.hpp>
 #include <functional>
 
 // Sample-owned input snapshot event. Not a BedrockDynamicSDK core dependency.

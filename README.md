@@ -103,7 +103,7 @@ LinuxではイベントAPI・Modロジックのユニットテストを実施。
 
 ## Debug console and Logger
 
-The sample uses SDK's optional header-only [Logger API](https://github.com/gamelist1990/BedrockDynamicSDK/blob/main/include/bedrock/logger.hpp)
+The sample uses SDK's optional header-only [Logger API](https://github.com/gamelist1990/BedrockDynamicSDK/blob/main/include/bedrock/logging/logger.hpp)
 for startup/version verification messages, without opening another window by default.
 On Windows, the debugger can receive OutputDebugStringA messages.
 
@@ -115,8 +115,8 @@ To show a console explicitly, build with:
 The sample then calls Console::open(L"Bedrock AutoSprint Debug") on the worker
 thread **after** DllMain. Any other mod can use:
 
-    #include <bedrock/console.hpp>
-    #include <bedrock/logger.hpp>
+    #include <bedrock/logging/console.hpp>
+    #include <bedrock/logging/logger.hpp>
 
     bedrock::Console::open(L"My Debug Console");
     bedrock::Logger logger{"MyMod"};
